@@ -113,6 +113,15 @@ button:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid
 .log{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;max-height:340px;overflow-y:auto}
 .log li{font-size:14px;padding:6px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
 .log li.sys{color:var(--ink-2)}
+.chatlog{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto;font-size:14px}
+.chatlog li{overflow-wrap:anywhere}
+.chatlog li.me b{color:var(--accent)}
+.note{display:block;font-size:12px;color:var(--ink-2)}
+.ansrow{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;font-size:13px;padding:2px 0 0 10px}
+.ansrow .note{display:inline}
+.timer{font-variant-numeric:tabular-nums}
+.timer b{font-family:var(--font-display);font-weight:400;font-size:20px}
+.timer.low,.timer.low b{color:var(--bad)}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:999px;font-size:14px;z-index:20;max-width:calc(100vw - 32px)}
 details summary{cursor:pointer;font-weight:700}
 details ul{margin:8px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:6px}
@@ -151,14 +160,16 @@ try {
 'use strict';
 
 /*REDUCER_START*/
-var MAX_PLAYERS = 6, START_AP = 5;
+var MAX_PLAYERS = 6, START_AP = 5, TIMER_OPTIONS = [20, 30, 45, 60], DEFAULT_TIMER = 30, CHAT_KEEP = 200;
+var TIMEOUT_SLACK_MS = 1500;
 
 function norm(s) { return String(s == null ? '' : s).toLowerCase().replace(/[\s.,!?~'"“”‘’·\-_()\[\]]/g, ''); }
 function clean(s, n) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, n || 80); }
 
 function newState() {
   return { exists: false, code: null, host: null, topic: { key: 'animal', label: '동물' }, phase: 'lobby',
-    players: Object.create(null), joined: [], order: [], turn: null, pending: null, log: [], winner: null };
+    players: Object.create(null), joined: [], order: [], turn: null, pending: null, log: [], chat: [], winner: null,
+    round: 0, timerSec: DEFAULT_TIMER, turnSeq: 0, turnTs: 0, now: 0 };
 }
 function aliveList(S) { return S.joined.filter(function (u) { return S.players[u] && S.players[u].alive; }); }
 
@@ -184,24 +195,36 @@ function checkWin(S) {
   }
   return false;
 }
+// A new turn: the turn number goes up and the server time of the triggering event is remembered (for the timer).
+function startTurn(S, id) { S.turn = id; S.turnSeq++; S.turnTs = S.now; }
 function tryBegin(S) {
   if (S.phase !== 'picking') return;
   var al = aliveList(S);
   if (al.length < 2 || !al.every(function (u) { return S.players[u].ready; })) return;
   S.phase = 'playing';
-  S.turn = S.order.filter(function (u) { return S.players[u].alive; })[0];
+  startTurn(S, S.order.filter(function (u) { return S.players[u].alive; })[0]);
   S.log.push({ k: 'begin' });
 }
 function advanceTurn(S) {
   var n = S.order.length, cur = Math.max(0, S.order.indexOf(S.turn));
   for (var k = 1; k <= n; k++) {
     var id = S.order[(cur + k) % n], p = S.players[id];
-    if (p && p.alive) { S.turn = id; return; }
+    if (p && p.alive) { startTurn(S, id); return; }
   }
+}
+// A question goes to everyone: it is finished once every living player except the asker has answered.
+function finishAsk(S) {
+  var pd = S.pending;
+  if (!pd || pd.type !== 'ask') return;
+  var need = aliveList(S).filter(function (u) { return u !== pd.from; });
+  if (!need.every(function (u) { return pd.answers[u]; })) return;
+  S.log.push({ k: 'qa', from: pd.from, text: pd.text, answers: need.map(function (u) { return { u: u, yes: pd.answers[u].yes, note: pd.answers[u].note }; }) });
+  S.pending = null; advanceTurn(S);
 }
 
 function apply(S, e) {
   var P = S.players, u = e.u, t, me, pd, g;
+  S.now = e.ts || 0;
   switch (e.t) {
     case 'create':
       if (S.exists) return;
@@ -215,12 +238,31 @@ function apply(S, e) {
       if (S.phase !== 'lobby' || u !== S.host) return;
       var lab = clean(e.label, 16); if (!lab) return;
       S.topic = { key: String(e.key || 'custom').slice(0, 20), label: lab }; return;
+    case 'timer':
+      if (S.phase !== 'lobby' || u !== S.host || TIMER_OPTIONS.indexOf(+e.sec) < 0) return;
+      S.timerSec = +e.sec; return;
+    case 'chat': {
+      if (!P[u]) return;
+      var tx = clean(e.text, 200); if (!tx) return;
+      S.chat.push({ u: u, text: tx });
+      if (S.chat.length > CHAT_KEEP) S.chat.shift();
+      return;
+    }
     case 'start': {
       if (S.phase !== 'lobby' || u !== S.host || S.joined.length < 2) return;
       var ord = Array.isArray(e.order) ? e.order : [];
       var ok = ord.length === S.joined.length && ord.every(function (x) { return !!P[x]; }) && new Set(ord).size === ord.length;
       S.order = ok ? ord.slice() : S.joined.slice();
       S.phase = 'picking'; return;
+    }
+    case 'rematch': {
+      // Host only, after a game: back to the lobby with the same people (kicked players are dropped).
+      if (S.phase !== 'ended' || u !== S.host) return;
+      S.joined = S.joined.filter(function (x) { return P[x] && P[x].out !== 'kick'; });
+      Object.keys(P).forEach(function (x) { if (S.joined.indexOf(x) < 0) delete P[x]; });
+      S.joined.forEach(function (x) { var p = P[x]; p.ap = START_AP; p.alive = true; p.ready = false; p.word = null; p.out = null; });
+      S.round++; S.phase = 'lobby'; S.order = []; S.turn = null; S.pending = null; S.winner = null; S.log = [];
+      return;
     }
     case 'ready':
       if (S.phase !== 'picking' || !P[u] || !P[u].alive) return;
@@ -235,46 +277,46 @@ function apply(S, e) {
       pd = S.pending;
       eliminate(S, t, 'kick');
       if (S.phase === 'picking') { if (!checkWin(S)) tryBegin(S); return; }
-      if (pd && (pd.to === t || pd.from === t)) {
-        if (pd.to === t && P[pd.from].alive) {
-          if (!pd.final) P[pd.from].ap += 1;
-          S.pending = null; checkWin(S); return;
-        }
-        S.pending = null;
-        if (!checkWin(S)) advanceTurn(S);
-        return;
+      if (checkWin(S)) return;
+      if (pd && pd.from === t) { S.pending = null; advanceTurn(S); return; }
+      if (pd && pd.type === 'guess' && pd.to === t) {
+        if (!pd.final) P[pd.from].ap += 1;
+        S.pending = null; startTurn(S, pd.from); return;
       }
-      if (!checkWin(S) && S.turn === t) advanceTurn(S);
+      if (pd && pd.type === 'ask') { finishAsk(S); return; }
+      if (S.turn === t) advanceTurn(S);
       return;
     }
-    case 'ask':
+    case 'ask': {
+      if (S.phase !== 'playing' || S.pending || u !== S.turn) return;
+      me = P[u];
+      if (!me || !me.alive || me.ap < 1) return;
+      var qtext = clean(e.text, 80); if (!qtext) return;
+      me.ap -= 1;
+      S.pending = { type: 'ask', from: u, text: qtext, answers: Object.create(null), id: e.id };
+      return;
+    }
     case 'guess': {
       if (S.phase !== 'playing' || S.pending || u !== S.turn) return;
       me = P[u]; t = P[e.to];
       if (!me || !me.alive || !t || !t.alive || e.to === u) return;
-      var text = clean(e.text, 80); if (!text) return;
-      if (e.t === 'ask') {
-        if (me.ap < 1) return;
-        me.ap -= 1;
-        S.pending = { type: 'ask', from: u, to: e.to, text: text, final: false, id: e.id };
-      } else {
-        var fin = me.ap < 1;
-        if (!fin) me.ap -= 1;
-        S.pending = { type: 'guess', from: u, to: e.to, text: text, final: fin, id: e.id };
-      }
+      var gtext = clean(e.text, 80); if (!gtext) return;
+      var fin = me.ap < 1;
+      if (!fin) me.ap -= 1;
+      S.pending = { type: 'guess', from: u, to: e.to, text: gtext, final: fin, id: e.id };
       return;
     }
     case 'answer':
       pd = S.pending;
-      if (!pd || pd.type !== 'ask' || pd.to !== u) return;
-      S.log.push({ k: 'qa', from: pd.from, to: pd.to, text: pd.text, yes: !!e.yes });
-      S.pending = null; advanceTurn(S); return;
+      if (!pd || pd.type !== 'ask' || u === pd.from || !P[u] || !P[u].alive || pd.answers[u]) return;
+      pd.answers[u] = { yes: !!e.yes, note: clean(e.note, 100) };
+      finishAsk(S); return;
     case 'verdict': {
       pd = S.pending;
       if (!pd || pd.type !== 'guess' || pd.to !== u) return;
       g = P[pd.from]; t = P[pd.to];
       var good = !!e.correct;
-      S.log.push({ k: 'gs', from: pd.from, to: pd.to, text: pd.text, ok: good, final: pd.final });
+      S.log.push({ k: 'gs', from: pd.from, to: pd.to, text: pd.text, ok: good, final: pd.final, note: clean(e.note, 100) });
       S.pending = null;
       if (good) {
         t.word = clean(e.word, 30) || pd.text;
@@ -284,6 +326,18 @@ function apply(S, e) {
         eliminate(S, pd.from, 'failed');
       }
       if (!checkWin(S)) advanceTurn(S);
+      return;
+    }
+    case 'timeout': {
+      // Anyone may report that the turn holder ran out of time; the server clock decides whether it counts.
+      if (S.phase !== 'playing' || S.pending || !P[u] || !(S.timerSec > 0)) return;
+      if (e.turn !== S.turnSeq) return;
+      me = P[S.turn];
+      if (!me || !me.alive || me.ap < 1) return;
+      if (e.ts - S.turnTs < S.timerSec * 1000 - TIMEOUT_SLACK_MS) return;
+      me.ap -= 1;
+      S.log.push({ k: 'timeout', u: S.turn });
+      advanceTurn(S);
       return;
     }
     case 'reveal':
@@ -317,9 +371,12 @@ var app = document.getElementById('app');
 var fs = null, auth = null, uid = null;
 var conn = { ready: false, error: null };
 var code = null, col = null, unsub = null, loaded = false, events = [], S = newState();
-var myWord = null, ctx = {}, sent = new Set();
-var ui = { name: '', codeIn: '', text: '', custom: '', topicIn: '', mode: 'ask', target: null, showWord: false,
-  confirmKick: null, opts: null, toast: '', slow: false };
+var myWord = null, myWordRound = 0, ctx = {}, sent = new Set();
+var lastRound = -1, turnKey = '', turnLocal = Date.now(), sentTimeout = -1, lastPendingId = null;
+var ui = { name: '', codeIn: '', text: '', custom: '', topicIn: '', chatIn: '', noteIn: '', mode: 'ask', target: null, showWord: false,
+  confirmKick: null, adminOpen: false, opts: null, toast: '', slow: false };
+// The word I picked this round. A word saved in an earlier round does not count.
+function W() { return myWord && myWordRound === S.round ? myWord : null; }
 var composing = false, dirty = false, slowT = null, toastT = null, writeChain = Promise.resolve();
 
 function esc(s) {
@@ -353,7 +410,9 @@ function flags(ap) {
 }
 var RULES = '<details class="card"><summary>게임 규칙</summary><ul>' +
   '<li>방장이 주제를 정하고, 모두 자기 제시어를 정해요. 직접 입력하거나 3개 후보 중 하나를 골라요. 제시어는 나만 알아요.</li>' +
-  '<li>자기 차례에 상대 한 명을 골라 예/아니오 질문을 하거나, 그 사람의 제시어를 맞혀 봐요. 한 번 하면 AP가 1 줄어요.</li>' +
+  '<li>자기 차례에 둘 중 하나를 해요. 모두에게 예/아니오 질문을 하면 다른 모든 사람이 자기 제시어 기준으로 답해요. 또는 한 명을 골라 그 사람의 제시어를 맞혀 봐요. 한 번 하면 AP가 1 줄어요.</li>' +
+  '<li>답할 때 필요하면 부연설명을 덧붙일 수 있어요.</li>' +
+  '<li>내 차례에는 제한 시간이 있어요(방장이 정해요). 시간 안에 행동하지 않으면 AP만 1 줄고 차례가 넘어가요.</li>' +
   '<li>모두 AP 5개로 시작해요. 질문과 답은 모두에게 공개돼요.</li>' +
   '<li>제시어를 맞히면 상대는 탈락, 나는 AP를 2 얻어요.</li>' +
   '<li>AP가 0이 되면 「최후의 기회」 상태가 돼요. 더 이상 질문은 못 하고, 내 차례마다 다른 사람의 제시어를 맞히는 시도만 할 수 있어요. 틀리면 바로 탈락, 맞히면 계속 살아남아요. 이때는 맞혀도 AP가 회복되지 않아요.</li>' +
@@ -408,12 +467,23 @@ function lobbyView(me) {
   }
   h += '</section>';
 
+  h += '<section class="card"><h2>제한 시간</h2>';
+  if (isHost) {
+    h += '<div class="chips">';
+    TIMER_OPTIONS.forEach(function (sec) { h += '<button type="button" class="chip" data-act="timer" data-sec="' + sec + '" aria-pressed="' + (S.timerSec === sec) + '">' + sec + '초</button>'; });
+    h += '</div>';
+  } else {
+    h += '<p class="big">' + S.timerSec + '초</p>';
+  }
+  h += '<p class="small muted">내 차례에 이 시간 안에 행동하지 않으면 AP가 1 줄고 차례가 넘어가요.</p></section>';
+
   if (isHost) {
     h += '<button type="button" class="primary" data-act="start"' + (S.joined.length < 2 ? ' disabled' : '') + '>게임 시작</button>' +
       '<p class="small muted">' + (S.joined.length < 2 ? '2명 이상 모여야 시작할 수 있어요. ' : '') + '4~6명이 가장 재미있어요.</p>';
   } else if (me) {
     h += '<p class="muted">방장이 시작하기를 기다리는 중이에요.</p>';
   }
+  h += chatView(me);
   return h;
 }
 
@@ -443,6 +513,7 @@ function pickingView(me) {
   });
   h += '</ul></section>';
   if (me && me.alive && me.ready) h += myWordChip(me);
+  h += chatView(me);
   if (S.host === uid) h += adminPanel();
   return h;
 }
@@ -450,35 +521,71 @@ function pickingView(me) {
 function myWordChip(me) {
   if (!me) return '';
   if (!me.alive) return '<div class="mine"><span>탈락했어요. 지켜보면서 응원해 주세요.</span></div>';
-  if (!myWord) return '<div class="mine"><span class="muted small">내 제시어를 불러오는 중이에요…</span></div>';
-  return '<div class="mine"><span class="small muted">내 제시어</span><b>' + (ui.showWord ? esc(myWord) : '● ● ● ●') + '</b><button type="button" class="small" data-act="toggleWord">' + (ui.showWord ? '숨기기' : '보기') + '</button></div>';
+  if (!W()) return '<div class="mine"><span class="muted small">내 제시어를 불러오는 중이에요…</span></div>';
+  return '<div class="mine"><span class="small muted">내 제시어</span><b>' + (ui.showWord ? esc(W()) : '● ● ● ●') + '</b><button type="button" class="small" data-act="toggleWord">' + (ui.showWord ? '숨기기' : '보기') + '</button></div>';
 }
+
+function chatView(me) {
+  var h = '<section class="card"><h3>채팅</h3><ul class="chatlog" id="chatBox">';
+  if (!S.chat.length) h += '<li class="muted small">아직 대화가 없어요.</li>';
+  S.chat.slice(-60).forEach(function (c) {
+    var p = S.players[c.u];
+    h += '<li' + (c.u === uid ? ' class="me"' : '') + '><b>' + (p ? esc(p.name) : '?') + '</b>' + (p && !p.alive && S.phase !== 'lobby' ? ' <span class="badge">탈락</span>' : '') + ' ' + esc(c.text) + '</li>';
+  });
+  h += '</ul>';
+  if (me) h += '<form class="row" data-form="chat"><div class="grow"><input type="text" id="chatIn" maxlength="200" autocomplete="off" aria-label="채팅 입력" value="' + esc(ui.chatIn) + '" placeholder="메시지를 입력하세요"></div><button type="submit">보내기</button></form>';
+  return h + '</section>';
+}
+
+function timerOn() {
+  var cur = S.players[S.turn];
+  return loaded && S.phase === 'playing' && !S.pending && S.timerSec > 0 && !!cur && cur.alive && cur.ap > 0;
+}
+function secsLeft() { return Math.max(0, Math.ceil(S.timerSec - (Date.now() - turnLocal) / 1000)); }
+function timerHtml() { var n = secsLeft(); return '<span class="timer' + (n <= 5 ? ' low' : '') + '">남은 시간 <b class="tleft">' + n + '</b>초</span>'; }
 
 function turnBanner() {
   var pd = S.pending;
+  if (pd && pd.type === 'ask') {
+    var need = aliveList(S).filter(function (u) { return u !== pd.from; });
+    var done = need.filter(function (u) { return pd.answers[u]; });
+    var h = '<div class="banner"><h2>' + nm(pd.from) + '님의 질문</h2><p class="big">' + esc(pd.text) + '</p>' +
+      '<p class="small muted">모두가 자기 제시어 기준으로 예/아니오로 답해요 (' + done.length + ' / ' + need.length + ')</p><div class="chips">';
+    need.forEach(function (u) { h += '<span class="badge' + (pd.answers[u] ? ' on' : '') + '">' + nm(u) + (pd.answers[u] ? ' 완료' : ' 대기') + '</span>'; });
+    return h + '</div></div>';
+  }
   if (pd) {
-    return '<div class="banner"><h2>' + (pd.type === 'ask' ? nm(pd.from) + '님이 ' + nm(pd.to) + '님에게 질문 중' : nm(pd.from) + '님이 ' + nm(pd.to) + '님의 제시어를 추측 중') + '</h2><p class="small muted">' + (pd.final ? '최후의 기회예요. ' : '') + '응답을 기다리고 있어요.</p></div>';
+    return '<div class="banner"><h2>' + nm(pd.from) + '님이 ' + nm(pd.to) + '님의 제시어를 추측 중</h2><p class="small muted">' + (pd.final ? '최후의 기회예요. ' : '') + '응답을 기다리고 있어요.</p></div>';
   }
   var cur = S.players[S.turn];
   if (!cur) return '';
   var mine = S.turn === uid;
   return '<div class="banner turn"><h2>' + (mine ? '내 차례예요' : nm(S.turn) + '님의 차례') + '</h2>' +
-    (cur.ap < 1 ? '<p class="small">최후의 기회 상태: 질문은 못 하고 정답 시도만 가능해요. 틀리면 탈락이에요.</p>' : '<p class="small muted">질문하거나 정답을 시도해요. AP가 1 줄어요.</p>') + '</div>';
+    (cur.ap < 1 ? '<p class="small">최후의 기회 상태: 질문은 못 하고 정답 시도만 가능해요. 틀리면 탈락이에요.</p>' : '<p class="small muted">모두에게 질문하거나, 한 명의 제시어를 맞혀 봐요. AP가 1 줄어요.</p>') +
+    (timerOn() ? '<p class="small">' + timerHtml() + '</p>' : '') + '</div>';
+}
+
+function noteField() {
+  return '<div class="field"><label for="noteIn" class="small">부연설명 (선택)</label><input type="text" id="noteIn" maxlength="100" autocomplete="off" value="' + esc(ui.noteIn) + '" placeholder="예: 정확히는 바다에 사는 종류만 해당돼요"></div>';
 }
 
 function pendingPanel() {
-  var pd = S.pending;
-  if (!pd || pd.to !== uid) return '';
-  var warn = myWord ? '' : '<p class="small" style="color:var(--bad)">제시어를 불러오지 못했어요. 기억하는 제시어 기준으로 답해 주세요.</p>';
+  var pd = S.pending, me = S.players[uid];
+  if (!pd || !me || !me.alive) return '';
+  var w = W();
+  var warn = w ? '' : '<p class="small" style="color:var(--bad)">제시어를 불러오지 못했어요. 기억하는 제시어 기준으로 답해 주세요.</p>';
   if (pd.type === 'ask') {
+    if (uid === pd.from) return '';
+    if (pd.answers[uid]) return '<section class="card"><p class="muted">답변을 보냈어요. 다른 사람들을 기다리는 중이에요.</p></section>';
     return '<section class="card"><h2>' + nm(pd.from) + '님의 질문</h2><p class="big">' + esc(pd.text) + '</p>' + warn +
-      '<p class="small muted">내 제시어 기준으로 솔직하게 답해 주세요.</p>' +
+      '<p class="small muted">내 제시어 기준으로 솔직하게 답해 주세요. 필요하면 부연설명을 적을 수 있어요.</p>' + noteField() +
       '<div class="yn"><button type="button" class="primary" data-act="answer" data-yes="1">예</button><button type="button" data-act="answer" data-yes="0">아니오</button></div></section>';
   }
-  var exact = myWord && norm(pd.text) === norm(myWord);
+  if (pd.to !== uid) return '';
+  var exact = w && norm(pd.text) === norm(w);
   if (exact) return '<section class="card"><h2>정답이에요</h2><p class="muted">' + nm(pd.from) + '님이 맞혔어요. 판정을 전송하는 중이에요.</p></section>';
   return '<section class="card"><h2>' + nm(pd.from) + '님의 추측</h2><p class="big">' + esc(pd.text) + '</p>' + warn +
-    '<p class="small muted">같은 뜻의 말(동의어)이면 정답으로 처리해 주세요.' + (pd.final ? ' 이 추측은 최후의 기회예요.' : '') + '</p>' +
+    '<p class="small muted">같은 뜻의 말(동의어)이면 정답으로 처리해 주세요.' + (pd.final ? ' 이 추측은 최후의 기회예요.' : '') + '</p>' + noteField() +
     '<div class="yn"><button type="button" class="primary" data-act="verdict" data-ok="1">정답</button><button type="button" data-act="verdict" data-ok="0">오답</button></div></section>';
 }
 
@@ -487,12 +594,15 @@ function actPanel(me) {
   var targets = aliveList(S).filter(function (u) { return u !== uid; });
   if (!ui.target || targets.indexOf(ui.target) < 0) ui.target = targets[0] || null;
   var h = '<section class="card"><h2>내 행동</h2>';
+  if (timerOn()) h += '<p class="small">' + timerHtml() + ' · 시간 안에 행동하지 않으면 AP가 1 줄고 차례가 넘어가요.</p>';
   if (fin) h += '<p><b>최후의 기회!</b> 정답 시도만 할 수 있어요. 맞히면 생존, 틀리면 탈락이에요. 맞혀도 AP는 회복되지 않고, 다음 차례에도 계속 맞혀야 해요.</p>';
-  else h += '<div class="seg"><button type="button" data-act="mode" data-m="ask" aria-pressed="' + (mode === 'ask') + '">질문하기</button><button type="button" data-act="mode" data-m="guess" aria-pressed="' + (mode === 'guess') + '">정답 맞히기</button></div>';
-  h += '<div class="field"><label>대상</label><div class="chips">';
-  targets.forEach(function (u) { h += '<button type="button" class="chip" data-act="target" data-u="' + esc(u) + '" aria-pressed="' + (ui.target === u) + '">' + nm(u) + '</button>'; });
-  h += '</div></div>';
-  h += '<form class="row" data-form="act"><div class="grow"><label for="text" class="small">' + (mode === 'ask' ? '예/아니오로 답할 수 있는 질문' : '이 사람의 제시어는?') + '</label>' +
+  else h += '<div class="seg"><button type="button" data-act="mode" data-m="ask" aria-pressed="' + (mode === 'ask') + '">모두에게 질문</button><button type="button" data-act="mode" data-m="guess" aria-pressed="' + (mode === 'guess') + '">정답 맞히기</button></div>';
+  if (mode === 'guess') {
+    h += '<div class="field"><label>누구의 제시어?</label><div class="chips">';
+    targets.forEach(function (u) { h += '<button type="button" class="chip" data-act="target" data-u="' + esc(u) + '" aria-pressed="' + (ui.target === u) + '">' + nm(u) + '</button>'; });
+    h += '</div></div>';
+  }
+  h += '<form class="row" data-form="act"><div class="grow"><label for="text" class="small">' + (mode === 'ask' ? '모두에게 던질 예/아니오 질문 (모두가 자기 제시어 기준으로 답해요)' : '이 사람의 제시어는?') + '</label>' +
     '<input type="text" id="text" maxlength="80" autocomplete="off" value="' + esc(ui.text) + '" placeholder="' + (mode === 'ask' ? '예: 살아 있는 것인가요?' : '예: 사과') + '"></div>' +
     '<button type="submit" class="primary" style="align-self:flex-end">' + (mode === 'ask' ? '질문 (AP -1)' : fin ? '최후의 추측' : '추측 (AP -1)') + '</button></form></section>';
   return h;
@@ -501,9 +611,12 @@ function actPanel(me) {
 function cluesFor(u) {
   var h = '';
   S.log.forEach(function (e) {
-    if (e.to !== u) return;
-    if (e.k === 'qa') h += '<li><span class="q">' + esc(e.text) + '</span><span class="pill ' + (e.yes ? 'yes' : 'no') + '">' + (e.yes ? '예' : '아니오') + '</span></li>';
-    else if (e.k === 'gs' && !e.ok) h += '<li><span class="q">추측: ' + esc(e.text) + '</span><span class="pill miss">오답</span></li>';
+    if (e.k === 'qa') {
+      var a = e.answers.filter(function (x) { return x.u === u; })[0];
+      if (a) h += '<li><span class="q">' + esc(e.text) + (a.note ? '<span class="note">' + esc(a.note) + '</span>' : '') + '</span><span class="pill ' + (a.yes ? 'yes' : 'no') + '">' + (a.yes ? '예' : '아니오') + '</span></li>';
+    } else if (e.k === 'gs' && e.to === u && !e.ok) {
+      h += '<li><span class="q">추측: ' + esc(e.text) + (e.note ? '<span class="note">' + esc(e.note) + '</span>' : '') + '</span><span class="pill miss">오답</span></li>';
+    }
   });
   return h;
 }
@@ -529,11 +642,18 @@ function logView() {
   var items = S.log.slice().reverse().slice(0, 80), h = '<section class="card"><h3>진행 기록</h3><ul class="log">';
   if (!items.length) h += '<li class="sys">아직 기록이 없어요.</li>';
   items.forEach(function (e) {
-    if (e.k === 'qa') h += '<li><b>' + nm(e.from) + '</b>님 → <b>' + nm(e.to) + '</b>님 · ' + esc(e.text) + ' <span class="pill ' + (e.yes ? 'yes' : 'no') + '">' + (e.yes ? '예' : '아니오') + '</span></li>';
-    else if (e.k === 'gs') {
-      if (e.ok) h += '<li><b>' + nm(e.from) + '</b>님이 <b>' + nm(e.to) + '</b>님의 제시어 「' + esc(e.text) + '」를 맞혔어요. ' + nm(e.to) + '님 탈락 · ' + (e.final ? '최후의 기회 성공 (AP 회복 없음)' : 'AP +2') + '</li>';
-      else h += '<li><b>' + nm(e.from) + '</b>님이 <b>' + nm(e.to) + '</b>님의 제시어를 「' + esc(e.text) + '」로 추측 · 오답' + (e.final ? ' · 최후의 기회 실패, ' + nm(e.from) + '님 탈락' : '') + '</li>';
+    if (e.k === 'qa') {
+      h += '<li><b>' + nm(e.from) + '</b>님의 질문 · ' + esc(e.text);
+      e.answers.forEach(function (a) {
+        h += '<div class="ansrow"><b>' + nm(a.u) + '</b> <span class="pill ' + (a.yes ? 'yes' : 'no') + '">' + (a.yes ? '예' : '아니오') + '</span>' + (a.note ? '<span class="note">' + esc(a.note) + '</span>' : '') + '</div>';
+      });
+      h += '</li>';
     }
+    else if (e.k === 'gs') {
+      if (e.ok) h += '<li><b>' + nm(e.from) + '</b>님이 <b>' + nm(e.to) + '</b>님의 제시어 「' + esc(e.text) + '」를 맞혔어요. ' + nm(e.to) + '님 탈락 · ' + (e.final ? '최후의 기회 성공 (AP 회복 없음)' : 'AP +2') + (e.note ? ' <span class="note">' + esc(e.note) + '</span>' : '') + '</li>';
+      else h += '<li><b>' + nm(e.from) + '</b>님이 <b>' + nm(e.to) + '</b>님의 제시어를 「' + esc(e.text) + '」로 추측 · 오답' + (e.final ? ' · 최후의 기회 실패, ' + nm(e.from) + '님 탈락' : '') + (e.note ? ' <span class="note">' + esc(e.note) + '</span>' : '') + '</li>';
+    }
+    else if (e.k === 'timeout') h += '<li class="sys">' + nm(e.u) + '님이 시간 안에 행동하지 못해 AP를 1 잃고 차례가 넘어갔어요.</li>';
     else if (e.k === 'kick') h += '<li class="sys">' + nm(e.u) + '님이 방장에 의해 퇴장됐어요.</li>';
     else if (e.k === 'begin') h += '<li class="sys">게임 시작</li>';
     else if (e.k === 'end') h += '<li class="sys">' + (e.winner ? nm(e.winner) + '님의 승리' : '승자 없이 종료') + '</li>';
@@ -544,7 +664,7 @@ function logView() {
 function adminPanel() {
   var others = S.joined.filter(function (u) { return u !== uid && S.players[u].alive; });
   if (!others.length) return '';
-  var h = '<details class="card"><summary>방 관리 (방장)</summary><p class="small muted">연결이 끊겨 진행이 멈췄을 때 해당 플레이어를 퇴장시킬 수 있어요.</p><div class="chips">';
+  var h = '<details class="card" id="adminBox"' + (ui.adminOpen ? ' open' : '') + '><summary>방 관리 (방장)</summary><p class="small muted">연결이 끊겨 진행이 멈췄을 때 해당 플레이어를 퇴장시킬 수 있어요.</p><div class="chips">';
   others.forEach(function (u) {
     h += '<button type="button" class="small danger" data-act="kick" data-u="' + esc(u) + '">' + (ui.confirmKick === u ? '정말 퇴장? 한 번 더 누르세요' : nm(u) + ' 퇴장') + '</button>';
   });
@@ -556,19 +676,25 @@ function playView(me) {
   h += myWordChip(me);
   h += pendingPanel();
   if (me && me.alive && S.turn === uid && !S.pending) h += actPanel(me);
-  h += playersGrid() + logView();
+  h += playersGrid() + chatView(me) + logView();
   if (S.host === uid) h += adminPanel();
   return h;
 }
 
 function endedView(me) {
   var h = '<div class="banner end"><h2>' + (S.winner ? nm(S.winner) + '님의 승리!' : '승자 없이 끝났어요') + '</h2><p class="small">마지막까지 살아남은 한 명이에요.</p></div>';
+  if (S.host === uid) {
+    h += '<div class="row"><button type="button" class="primary" data-act="rematch">다시하기</button><button type="button" data-act="leave">처음으로</button></div>' +
+      '<p class="small muted">「다시하기」를 누르면 같은 사람들이 대기실로 돌아가요. 주제와 제한 시간을 바꾸고 다시 시작할 수 있어요.</p>';
+  } else {
+    h += '<p class="muted">방장이 「다시하기」를 누르기를 기다리는 중이에요.</p><div><button type="button" data-act="leave">처음으로</button></div>';
+  }
   h += '<section class="card"><h3>제시어 공개</h3><ul class="plist">';
   S.order.forEach(function (u) {
     var p = S.players[u]; if (!p) return;
     h += '<li><span class="nm">' + nm(u) + '</span><span>' + (p.word ? esc(p.word) : '…') + '</span>' + (u === S.winner ? '<span class="badge on">승</span>' : '') + '</li>';
   });
-  h += '</ul></section>' + logView() + '<button type="button" class="primary" data-act="leave">처음으로</button>';
+  h += '</ul></section>' + chatView(me) + logView();
   return h;
 }
 
@@ -616,6 +742,8 @@ function render() {
     var el = document.getElementById(id);
     if (el) { el.focus(); if (ss != null) { try { el.setSelectionRange(ss, se); } catch (e) {} } }
   }
+  var cb = document.getElementById('chatBox');
+  if (cb) cb.scrollTop = cb.scrollHeight;
 }
 
 /* ---------- room plumbing ---------- */
@@ -633,6 +761,7 @@ function loadWord(c) {
   getDoc(doc(fs, 'users', uid, 'words', c)).then(function (s) {
     if (c !== code) return;
     myWord = s.exists() && s.data() ? (s.data().word || null) : null;
+    myWordRound = s.exists() && s.data() ? (s.data().r || 0) : 0;
     onState();
   }).catch(function () {});
 }
@@ -647,7 +776,8 @@ function toEvent(d) {
 
 function enterRoom(c, opts) {
   if (unsub) { unsub(); unsub = null; }
-  code = c; ctx = opts || {}; events = []; S = newState(); loaded = false; myWord = null; sent = new Set();
+  code = c; ctx = opts || {}; events = []; S = newState(); loaded = false; myWord = null; myWordRound = 0; sent = new Set();
+  lastRound = -1; turnKey = ''; lastPendingId = null; sentTimeout = -1; turnLocal = Date.now();
   ui.opts = null; ui.slow = false; ui.showWord = false; ui.confirmKick = null; ui.text = ''; conn.error = conn.error === 'room' ? null : conn.error;
   col = collection(fs, 'rooms', c, 'events');
   try { location.hash = 'r-' + c; } catch (e) {}
@@ -692,30 +822,56 @@ function ensureCtx() {
 
 function autoActions() {
   if (!S.exists || !uid) return;
-  var me = S.players[uid], pd = S.pending;
-  if (pd && pd.type === 'guess' && pd.to === uid && myWord && !sent.has(pd.id) && norm(pd.text) === norm(myWord)) {
+  var me = S.players[uid], pd = S.pending, w = W();
+  if (pd && pd.type === 'guess' && pd.to === uid && w && !sent.has(pd.id) && norm(pd.text) === norm(w)) {
     sent.add(pd.id);
-    emit({ t: 'verdict', correct: true, word: myWord });
+    emit({ t: 'verdict', correct: true, word: w });
   }
-  if (me && me.word == null && myWord && (!me.alive || S.phase === 'ended') && !sent.has('reveal')) {
+  if (me && me.word == null && w && (!me.alive || S.phase === 'ended') && !sent.has('reveal')) {
     sent.add('reveal');
-    emit({ t: 'reveal', word: myWord });
+    emit({ t: 'reveal', word: w });
   }
 }
 
 function onState() {
   if (ensureCtx()) return;
+  if (S.round !== lastRound) {
+    lastRound = S.round; sent = new Set();
+    ui.opts = null; ui.showWord = false; ui.mode = 'ask'; ui.text = ''; ui.noteIn = ''; ui.confirmKick = null;
+  }
+  // The turn timer counts from the moment this screen learns about a new turn.
+  var tk = S.phase + ':' + S.turnSeq;
+  if (tk !== turnKey) { turnKey = tk; turnLocal = Date.now(); ui.text = ''; }
+  var pid = S.pending ? S.pending.id : null;
+  if (pid !== lastPendingId) { lastPendingId = pid; ui.noteIn = ''; }
   render();
   autoActions();
+}
+
+// Once a second: refresh the countdown, and report a timeout when time is up.
+// The turn holder reports right away; everybody else waits 3 more seconds in case the holder is away.
+function tick() {
+  if (!timerOn()) return;
+  var left = S.timerSec - (Date.now() - turnLocal) / 1000;
+  var els = document.querySelectorAll('.tleft');
+  for (var i = 0; i < els.length; i++) {
+    els[i].textContent = Math.max(0, Math.ceil(left));
+    var tm = els[i].closest('.timer'); if (tm) tm.classList.toggle('low', left <= 5);
+  }
+  var wait = S.turn === uid ? 0 : 3;
+  if (left <= -wait && sentTimeout !== S.turnSeq && S.players[uid]) {
+    sentTimeout = S.turnSeq;
+    emit({ t: 'timeout', turn: S.turnSeq });
+  }
 }
 
 function setWord(w) {
   w = clean(w, 30);
   if (!w) { toast('제시어를 입력하거나 골라 주세요.'); return; }
-  var c = code;
-  setDoc(doc(fs, 'users', uid, 'words', c), { word: w, ts: Date.now() }).then(function () {
+  var c = code, r = S.round;
+  setDoc(doc(fs, 'users', uid, 'words', c), { word: w, r: r, ts: Date.now() }).then(function () {
     if (c !== code) return;
-    myWord = w; ui.custom = ''; ui.showWord = true;
+    myWord = w; myWordRound = r; ui.custom = ''; ui.showWord = true;
     emit({ t: 'ready' }); render();
   }).catch(function () { toast('제시어를 저장하지 못했어요. 권한을 확인해 주세요.'); });
 }
@@ -724,10 +880,10 @@ function submitAct() {
   var me = S.players[uid];
   if (!me || S.turn !== uid || S.pending) return;
   var fin = me.ap < 1, mode = fin ? 'guess' : ui.mode, text = clean(ui.text, 80);
-  if (!ui.target || !S.players[ui.target] || !S.players[ui.target].alive) { toast('대상을 골라 주세요.'); return; }
+  if (mode === 'guess' && (!ui.target || !S.players[ui.target] || !S.players[ui.target].alive)) { toast('누구의 제시어인지 골라 주세요.'); return; }
   if (!text) { toast(mode === 'ask' ? '질문을 입력해 주세요.' : '정답을 입력해 주세요.'); return; }
   ui.text = '';
-  emit({ t: mode, to: ui.target, text: text });
+  emit(mode === 'ask' ? { t: 'ask', text: text } : { t: 'guess', to: ui.target, text: text });
   render();
 }
 
@@ -763,12 +919,19 @@ function act(a, b) {
     case 'reroll': ui.opts = shuffle(PRESETS[S.topic.key].pool.slice()).slice(0, 3); render(); return;
     case 'mode': ui.mode = b.getAttribute('data-m'); render(); return;
     case 'target': ui.target = b.getAttribute('data-u'); render(); return;
-    case 'answer': emit({ t: 'answer', yes: b.getAttribute('data-yes') === '1' }); return;
-    case 'verdict': {
-      var ok = b.getAttribute('data-ok') === '1', ev = { t: 'verdict', correct: ok };
-      if (ok && myWord) ev.word = myWord;
-      emit(ev); return;
+    case 'answer': {
+      var aev = { t: 'answer', yes: b.getAttribute('data-yes') === '1' }, an = clean(ui.noteIn, 100);
+      if (an) aev.note = an;
+      ui.noteIn = ''; emit(aev); render(); return;
     }
+    case 'verdict': {
+      var ok = b.getAttribute('data-ok') === '1', ev = { t: 'verdict', correct: ok }, vw = W(), vn = clean(ui.noteIn, 100);
+      if (ok && vw) ev.word = vw;
+      if (vn) ev.note = vn;
+      ui.noteIn = ''; emit(ev); render(); return;
+    }
+    case 'timer': emit({ t: 'timer', sec: +b.getAttribute('data-sec') }); return;
+    case 'rematch': emit({ t: 'rematch' }); return;
     case 'toggleWord': ui.showWord = !ui.showWord; render(); return;
   }
 }
@@ -784,6 +947,11 @@ function form(f) {
     emit({ t: 'topic', key: 'custom', label: lab });
   } else if (f === 'word') setWord(ui.custom);
   else if (f === 'act') submitAct();
+  else if (f === 'chat') {
+    var tx = clean(ui.chatIn, 200);
+    if (!tx) return;
+    ui.chatIn = ''; emit({ t: 'chat', text: tx }); render();
+  }
 }
 
 app.addEventListener('click', function (e) {
@@ -802,6 +970,11 @@ app.addEventListener('compositionend', function (e) {
   if (t && t.id && Object.prototype.hasOwnProperty.call(ui, t.id) && 'value' in t) ui[t.id] = t.value;
   if (dirty) { dirty = false; render(); }
 });
+
+// Remember whether the host's 방 관리 menu is open, so a screen refresh does not close it.
+app.addEventListener('toggle', function (e) { if (e.target && e.target.id === 'adminBox') ui.adminOpen = e.target.open; }, true);
+
+setInterval(tick, 250);
 
 /* ---------- boot ---------- */
 if (!loadError) render();

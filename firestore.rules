@@ -1,0 +1,46 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 게임 진행 기록
+    // - 읽기: 로그인(익명 포함)한 사용자
+    // - 쓰기: "내 이름으로" 새 기록을 추가하는 것만 가능 (수정, 삭제 불가)
+    // - 기록 시각은 서버 시각만 허용 (시간을 조작해 순서를 뒤집는 것을 막음)
+    match /rooms/{code}/events/{eventId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && code.matches('[A-Z0-9]{4}')
+        && isValidEvent(request.resource.data);
+      allow update, delete: if false;
+    }
+
+    // 내 제시어: 본인만 읽고 쓸 수 있음
+    match /users/{uid}/words/{code} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    function isValidEvent(d) {
+      return d.keys().hasOnly(['u', 'n', 'ts', 't', 'code', 'name', 'topic', 'key', 'label', 'order', 'target', 'to', 'text', 'yes', 'correct', 'word', 'note', 'sec', 'turn'])
+        && d.keys().hasAll(['u', 'n', 'ts', 't'])
+        && d.u == request.auth.uid
+        && d.ts == request.time
+        && d.n is int && d.n >= 1
+        && d.t in ['create', 'join', 'topic', 'start', 'ready', 'kick', 'ask', 'guess', 'answer', 'verdict', 'reveal', 'chat', 'rematch', 'timer', 'timeout']
+        && d.get('code', '') is string && d.get('code', '').size() <= 4
+        && d.get('name', '') is string && d.get('name', '').size() <= 16
+        && d.get('key', '') is string && d.get('key', '').size() <= 20
+        && d.get('label', '') is string && d.get('label', '').size() <= 32
+        && d.get('target', '') is string && d.get('target', '').size() <= 128
+        && d.get('to', '') is string && d.get('to', '').size() <= 128
+        && d.get('text', '') is string && d.get('text', '').size() <= 200
+        && d.get('word', '') is string && d.get('word', '').size() <= 60
+        && d.get('note', '') is string && d.get('note', '').size() <= 200
+        && d.get('sec', 30) is int
+        && d.get('turn', 0) is int
+        && d.get('yes', false) is bool
+        && d.get('correct', false) is bool
+        && d.get('topic', {}) is map
+        && d.get('order', []) is list && d.get('order', []).size() <= 6;
+    }
+  }
+}
