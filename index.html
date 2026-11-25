@@ -397,7 +397,7 @@ function toast(msg) {
 var PEAKS = '<svg viewBox="0 0 100 40" aria-hidden="true"><path d="M0 40 L10 28 L18 34 L30 20 L38 28 L50 14 L58 22 L70 8 L78 16 L90 2 L100 40Z" fill="var(--accent)"/></svg>';
 
 function brand() {
-  return '<header class="brand">' + PEAKS + '<h1>다섯고개</h1>';
+  return '<header class="brand">' + PEAKS + '<h1>다섯고개</h1></p>';
 }
 function flags(ap) {
   var on = Math.min(ap, 5), h = '<span class="flags">';
@@ -415,7 +415,9 @@ var RULES = '<details class="card"><summary>게임 규칙</summary><ul>' +
   '<li>누군가 질문을 하면 나머지 플레이어 모두가 예, 아니오로 대답해야 합니다.</li>' +
   '<li>질문을 하거나 제시어를 맞출 때 AP가 1씩 소모됩니다.</li>' +
   '<li>제시어를 맞히면 상대는 탈락하고, AP를 2 얻습니다.</li>' +
-  '<li>AP가 0이 되면 더 이상 질문을 할 수 없습니다. 다른 사람의 제시어를 맞히는 시도만 할 수 있으며, 틀리면 바로 탈락합니다. 맞히면 탈락하지 않지만 이때는 맞혀도 AP를 얻을 수 없습니다.</li>' +
+  '<li>AP가 0이 되면 더 이상 질문을 할 수 없습니다.</li>' +
+  '<li>다른 사람의 제시어를 맞히는 시도만 할 수 있으며, 틀리면 바로 탈락합니다.<li>' +
+  '<li>맞히면 탈락하지 않지만 이때는 맞혀도 AP를 얻을 수 없습니다.</li>' +
   '<li>마지막까지 살아남는 사람이 우승자입니다.</li>' +
   '</ul></details>';
 
