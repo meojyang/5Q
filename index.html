@@ -397,7 +397,7 @@ function toast(msg) {
 var PEAKS = '<svg viewBox="0 0 100 40" aria-hidden="true"><path d="M0 40 L10 28 L18 34 L30 20 L38 28 L50 14 L58 22 L70 8 L78 16 L90 2 L100 40Z" fill="var(--accent)"/></svg>';
 
 function brand() {
-  return '<header class="brand">' + PEAKS + '<h1>다섯고개</h1><p class="tag">예 · 아니오 질문 다섯 번으로 상대의 제시어를 알아내는 서바이벌</p></header>';
+  return '<header class="brand">' + PEAKS + '<h1>다섯고개</h1>';
 }
 function flags(ap) {
   var on = Math.min(ap, 5), h = '<span class="flags">';
@@ -409,15 +409,14 @@ function flags(ap) {
   return h + '<span class="apn">AP ' + ap + '</span>';
 }
 var RULES = '<details class="card"><summary>게임 규칙</summary><ul>' +
-  '<li>방장이 주제를 정하고, 모두 자기 제시어를 정해요. 직접 입력하거나 3개 후보 중 하나를 골라요. 제시어는 나만 알아요.</li>' +
-  '<li>자기 차례에 둘 중 하나를 해요. 모두에게 예/아니오 질문을 하면 다른 모든 사람이 자기 제시어 기준으로 답해요. 또는 한 명을 골라 그 사람의 제시어를 맞혀 봐요. 한 번 하면 AP가 1 줄어요.</li>' +
-  '<li>답할 때 필요하면 부연설명을 덧붙일 수 있어요.</li>' +
-  '<li>내 차례에는 제한 시간이 있어요(방장이 정해요). 시간 안에 행동하지 않으면 AP만 1 줄고 차례가 넘어가요.</li>' +
-  '<li>모두 AP 5개로 시작해요. 질문과 답은 모두에게 공개돼요.</li>' +
-  '<li>제시어를 맞히면 상대는 탈락, 나는 AP를 2 얻어요.</li>' +
-  '<li>AP가 0이 되면 「최후의 기회」 상태가 돼요. 더 이상 질문은 못 하고, 내 차례마다 다른 사람의 제시어를 맞히는 시도만 할 수 있어요. 틀리면 바로 탈락, 맞히면 계속 살아남아요. 이때는 맞혀도 AP가 회복되지 않아요.</li>' +
-  '<li>AP가 0이어도 살아 있으면 다른 사람의 질문과 정답 시도를 받을 수 있고, 탈락할 수 있어요.</li>' +
-  '<li>마지막 한 명이 이겨요.</li>' +
+  '<li>주제를 정합니다.</li>' +
+  '<li>본인의 제시어를 정한 뒤 게임을 시작합니다.</li>' +
+  '<li>본인의 차례가 오면, 질문을 하거나 다른 사람의 제시어를 맞출 수 있습니다.</li>' +
+  '<li>누군가 질문을 하면 나머지 플레이어 모두가 예, 아니오로 대답해야 합니다.</li>' +
+  '<li>질문을 하거나 제시어를 맞출 때 AP가 1씩 소모됩니다.</li>' +
+  '<li>제시어를 맞히면 상대는 탈락하고, AP를 2 얻습니다.</li>' +
+  '<li>AP가 0이 되면 더 이상 질문을 할 수 없습니다. 다른 사람의 제시어를 맞히는 시도만 할 수 있으며, 틀리면 바로 탈락합니다. 맞히면 탈락하지 않지만 이때는 맞혀도 AP를 얻을 수 없습니다.</li>' +
+  '<li>마지막까지 살아남는 사람이 우승자입니다.</li>' +
   '</ul></details>';
 
 function googleUser() { var u = auth && auth.currentUser; return u && !u.isAnonymous ? u : null; }
@@ -434,10 +433,10 @@ function googleHint(e) {
 function accountCard() {
   var gu = googleUser(), h = '<section class="card">';
   if (gu) {
-    h += '<div class="row"><div class="grow"><b>' + esc(gu.displayName || 'Google 계정') + '</b><p class="small muted">Google 계정으로 로그인했어요. 기기를 바꾸거나 사이트 데이터를 지워도, 같은 계정으로 들어오면 진행 중인 방에 같은 사람으로 돌아올 수 있어요.</p></div>' +
+    h += '<div class="row"><div class="grow"><b>' + esc(gu.displayName || 'Google 계정') + '</b><p class="small muted">Google 계정으로 로그인 중</p></div>' +
       '<button type="button" class="small" data-act="logout"' + (ui.loginBusy ? ' disabled' : '') + '>로그아웃</button></div>';
   } else {
-    h += '<div class="row"><div class="grow"><b>Google로 로그인 (선택)</b><p class="small muted">로그인하지 않아도 바로 할 수 있어요. 로그인하면 기기를 바꾸거나 사이트 데이터를 지워도, 진행 중인 방에 같은 사람으로 돌아올 수 있어요.</p></div>' +
+    h += '<div class="row"><div class="grow"><b>Google로 로그인 (선택)</b><p class="small muted">로그인 없이 시작하려면 닉네임만 입력하세요.</p></div>' +
       '<button type="button" data-act="googleLogin"' + (ui.loginBusy ? ' disabled' : '') + '>Google로 로그인</button></div>';
     if (/KAKAOTALK|NAVER\(inapp|Instagram|FBAN|FBAV|Line\//i.test(navigator.userAgent)) {
       h += '<p class="small" style="color:var(--bad)">카카오톡 같은 앱 안의 브라우저에서는 Google 로그인이 막힐 수 있어요. Chrome이나 Safari로 열어 주세요.</p>';
@@ -487,7 +486,7 @@ function lobbyView(me) {
     Object.keys(PRESETS).forEach(function (k) {
       h += '<button type="button" class="chip" data-act="topic" data-key="' + k + '" aria-pressed="' + (S.topic.key === k) + '">' + PRESETS[k].label + '</button>';
     });
-    h += '</div><form class="row" data-form="topicCustom"><div class="grow"><label for="topicIn" class="small">직접 정하기 (이 경우 제시어는 직접 입력)</label><input type="text" id="topicIn" maxlength="16" autocomplete="off" value="' + esc(ui.topicIn) + '" placeholder="예: 우리 학교 선생님"></div><button type="submit" style="align-self:flex-end">적용</button></form>';
+    h += '</div><form class="row" data-form="topicCustom"><div class="grow"><label for="topicIn" class="small">직접 정하기</label><input type="text" id="topicIn" maxlength="16" autocomplete="off" value="' + esc(ui.topicIn) + '" placeholder="예: 우리 학교 선생님"></div><button type="submit" style="align-self:flex-end">적용</button></form>';
     if (S.topic.key === 'custom') h += '<p class="small muted">현재 주제: ' + esc(S.topic.label) + '</p>';
   } else {
     h += '<p class="big">' + esc(S.topic.label) + '</p><p class="small muted">방장이 주제를 정해요.</p>';
@@ -502,11 +501,10 @@ function lobbyView(me) {
   } else {
     h += '<p class="big">' + S.timerSec + '초</p>';
   }
-  h += '<p class="small muted">내 차례에 이 시간 안에 행동하지 않으면 AP가 1 줄고 차례가 넘어가요.</p></section>';
 
   if (isHost) {
     h += '<button type="button" class="primary" data-act="start"' + (S.joined.length < 2 ? ' disabled' : '') + '>게임 시작</button>' +
-      '<p class="small muted">' + (S.joined.length < 2 ? '2명 이상 모여야 시작할 수 있어요. ' : '') + '4~6명이 가장 재미있어요.</p>';
+      '<p class="small muted">' + (S.joined.length < 2 ? '2명 이상 모여야 시작할 수 있어요. ' : '') + '권장 플레이어 수: 4~6명</p>';
   } else if (me) {
     h += '<p class="muted">방장이 시작하기를 기다리는 중이에요.</p>';
   }
@@ -588,7 +586,7 @@ function turnBanner() {
   if (!cur) return '';
   var mine = S.turn === uid;
   return '<div class="banner turn"><h2>' + (mine ? '내 차례예요' : nm(S.turn) + '님의 차례') + '</h2>' +
-    (cur.ap < 1 ? '<p class="small">최후의 기회 상태: 질문은 못 하고 정답 시도만 가능해요. 틀리면 탈락이에요.</p>' : '<p class="small muted">모두에게 질문하거나, 한 명의 제시어를 맞혀 봐요. AP가 1 줄어요.</p>') +
+    (cur.ap < 1 ? '<p class="small">AP를 전부 소진했습니다. 살아남을 방법은 오직 누군가의 제시어를 맞추는 것 뿐입니다.</p>' : '<p class="small muted">모두에게 질문하거나, 한 명의 제시어를 맞혀 봐요. AP가 1 줄어요.</p>') +
     (timerOn() ? '<p class="small">' + timerHtml() + '</p>' : '') + '</div>';
 }
 
@@ -622,10 +620,10 @@ function actPanel(me) {
   if (!ui.target || targets.indexOf(ui.target) < 0) ui.target = targets[0] || null;
   var h = '<section class="card"><h2>내 행동</h2>';
   if (timerOn()) h += '<p class="small">' + timerHtml() + ' · 시간 안에 행동하지 않으면 AP가 1 줄고 차례가 넘어가요.</p>';
-  if (fin) h += '<p><b>최후의 기회!</b> 정답 시도만 할 수 있어요. 맞히면 생존, 틀리면 탈락이에요. 맞혀도 AP는 회복되지 않고, 다음 차례에도 계속 맞혀야 해요.</p>';
+  if (fin) h += '<p><b>마지막 기회</b> 맞히면 생존, 틀리면 탈락</p>';
   else h += '<div class="seg"><button type="button" data-act="mode" data-m="ask" aria-pressed="' + (mode === 'ask') + '">모두에게 질문</button><button type="button" data-act="mode" data-m="guess" aria-pressed="' + (mode === 'guess') + '">정답 맞히기</button></div>';
   if (mode === 'guess') {
-    h += '<div class="field"><label>누구의 제시어?</label><div class="chips">';
+    h += '<div class="field"><label>대상</label><div class="chips">';
     targets.forEach(function (u) { h += '<button type="button" class="chip" data-act="target" data-u="' + esc(u) + '" aria-pressed="' + (ui.target === u) + '">' + nm(u) + '</button>'; });
     h += '</div></div>';
   }
@@ -655,7 +653,7 @@ function playersGrid() {
     var st = '';
     if (!p.alive) st = '탈락 · 제시어: ' + (p.word ? '<b>' + esc(p.word) + '</b>' : '공개 대기 중');
     else if (S.turn === u) st = '지금 차례';
-    else if (p.ap < 1) st = '최후의 기회 상태 · 질문 불가, 틀리면 탈락';
+    else if (p.ap < 1) st = '질문 불가';
     var cl = cluesFor(u);
     h += '<article class="pcard' + (S.turn === u && p.alive ? ' turn' : '') + (!p.alive ? ' out' : '') + '"><header><span class="nm">' + nm(u) + '</span>' +
       (u === uid ? '<span class="badge">나</span>' : '') + (u === S.host ? '<span class="badge on">방장</span>' : '') + '</header>' +
