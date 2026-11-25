@@ -147,11 +147,11 @@ details ul{margin:8px 0 0;padding-left:20px;display:flex;flex-direction:column;g
 
 <script type="module" onerror="window.__fiveLoadFail && window.__fiveLoadFail()">
 const FB = 'https://www.gstatic.com/firebasejs/10.14.1/';
-let initializeApp, getAuth, signInAnonymously, initializeFirestore, collection, doc, addDoc, getDoc, setDoc, onSnapshot, serverTimestamp, firebaseConfig;
+let initializeApp, getAuth, signInAnonymously, GoogleAuthProvider, signInWithPopup, linkWithPopup, signInWithCredential, signOut, onAuthStateChanged, initializeFirestore, collection, doc, addDoc, getDoc, setDoc, onSnapshot, serverTimestamp, firebaseConfig;
 let loadError = null;
 try {
   ({ initializeApp } = await import(FB + 'firebase-app.js'));
-  ({ getAuth, signInAnonymously } = await import(FB + 'firebase-auth.js'));
+  ({ getAuth, signInAnonymously, GoogleAuthProvider, signInWithPopup, linkWithPopup, signInWithCredential, signOut, onAuthStateChanged } = await import(FB + 'firebase-auth.js'));
   ({ initializeFirestore, collection, doc, addDoc, getDoc, setDoc, onSnapshot, serverTimestamp } = await import(FB + 'firebase-firestore.js'));
   ({ firebaseConfig } = await import('./firebase-config.js'));
 } catch (e) { loadError = e; }
@@ -374,7 +374,7 @@ var code = null, col = null, unsub = null, loaded = false, events = [], S = newS
 var myWord = null, myWordRound = 0, ctx = {}, sent = new Set();
 var lastRound = -1, turnKey = '', turnLocal = Date.now(), sentTimeout = -1, lastPendingId = null;
 var ui = { name: '', codeIn: '', text: '', custom: '', topicIn: '', chatIn: '', noteIn: '', mode: 'ask', target: null, showWord: false,
-  confirmKick: null, adminOpen: false, opts: null, toast: '', slow: false };
+  confirmKick: null, adminOpen: false, opts: null, toast: '', slow: false, loginMsg: '', loginBusy: false };
 // The word I picked this round. A word saved in an earlier round does not count.
 function W() { return myWord && myWordRound === S.round ? myWord : null; }
 var composing = false, dirty = false, slowT = null, toastT = null, writeChain = Promise.resolve();
@@ -420,8 +420,35 @@ var RULES = '<details class="card"><summary>게임 규칙</summary><ul>' +
   '<li>마지막 한 명이 이겨요.</li>' +
   '</ul></details>';
 
+function googleUser() { var u = auth && auth.currentUser; return u && !u.isAnonymous ? u : null; }
+function googleHint(e) {
+  var c = String((e && e.code) || (e && e.message) || e);
+  if (/popup-closed-by-user|cancelled-popup-request/.test(c)) return '';
+  if (/popup-blocked/.test(c)) return '팝업이 차단됐어요. 브라우저의 팝업 차단을 풀고 다시 눌러 주세요.';
+  if (/unauthorized-domain/.test(c)) return 'Firebase 콘솔의 Authentication 설정에서 「승인된 도메인」에 이 사이트 주소(' + location.hostname + ')를 추가해 주세요.';
+  if (/operation-not-allowed/.test(c)) return 'Firebase 콘솔의 Authentication 로그인 방법에서 Google을 사용 설정해 주세요.';
+  if (/network/.test(c)) return '네트워크 연결을 확인해 주세요.';
+  if (/disallowed_useragent|web-storage-unsupported/.test(c)) return '이 브라우저에서는 Google 로그인을 쓸 수 없어요. Chrome이나 Safari에서 열어 주세요.';
+  return '로그인하지 못했어요. (오류 코드: ' + c + ')';
+}
+function accountCard() {
+  var gu = googleUser(), h = '<section class="card">';
+  if (gu) {
+    h += '<div class="row"><div class="grow"><b>' + esc(gu.displayName || 'Google 계정') + '</b><p class="small muted">Google 계정으로 로그인했어요. 기기를 바꾸거나 사이트 데이터를 지워도, 같은 계정으로 들어오면 진행 중인 방에 같은 사람으로 돌아올 수 있어요.</p></div>' +
+      '<button type="button" class="small" data-act="logout"' + (ui.loginBusy ? ' disabled' : '') + '>로그아웃</button></div>';
+  } else {
+    h += '<div class="row"><div class="grow"><b>Google로 로그인 (선택)</b><p class="small muted">로그인하지 않아도 바로 할 수 있어요. 로그인하면 기기를 바꾸거나 사이트 데이터를 지워도, 진행 중인 방에 같은 사람으로 돌아올 수 있어요.</p></div>' +
+      '<button type="button" data-act="googleLogin"' + (ui.loginBusy ? ' disabled' : '') + '>Google로 로그인</button></div>';
+    if (/KAKAOTALK|NAVER\(inapp|Instagram|FBAN|FBAV|Line\//i.test(navigator.userAgent)) {
+      h += '<p class="small" style="color:var(--bad)">카카오톡 같은 앱 안의 브라우저에서는 Google 로그인이 막힐 수 있어요. Chrome이나 Safari로 열어 주세요.</p>';
+    }
+  }
+  if (ui.loginMsg) h += '<p class="small" style="color:var(--bad)">' + esc(ui.loginMsg) + '</p>';
+  return h + '</section>';
+}
+
 function homeView() {
-  return brand() +
+  return brand() + accountCard() +
     '<section class="card">' +
     '<div class="field"><label for="name">닉네임</label><input type="text" id="name" maxlength="8" autocomplete="off" value="' + esc(ui.name) + '" placeholder="최대 8자"></div>' +
     '<button type="button" class="primary" data-act="create">방 만들기</button>' +
@@ -887,6 +914,39 @@ function submitAct() {
   render();
 }
 
+function googleLogin() {
+  if (ui.loginBusy || !auth) return;
+  ui.loginBusy = true; ui.loginMsg = '';
+  var provider = new GoogleAuthProvider(), user = auth.currentUser, p;
+  // The popup has to open straight from the click, so nothing may be awaited before this call.
+  if (user && user.isAnonymous) {
+    // Upgrade the guest account so the player id stays the same.
+    p = linkWithPopup(user, provider).catch(function (e) {
+      if (e && e.code === 'auth/credential-already-in-use') {
+        var cred = GoogleAuthProvider.credentialFromError(e);
+        if (cred) return signInWithCredential(auth, cred);   // this Google account already played: use that account
+      }
+      throw e;
+    });
+  } else {
+    p = signInWithPopup(auth, provider);
+  }
+  render();
+  p.then(function () {
+    var gu = auth.currentUser;
+    uid = gu.uid;
+    if (!clean(ui.name, 8) && gu.displayName) { ui.name = clean(gu.displayName, 8); store('five:name', ui.name); }
+  }).catch(function (e) { ui.loginMsg = googleHint(e); }).then(function () { ui.loginBusy = false; render(); });
+}
+
+function logout() {
+  if (ui.loginBusy || !auth) return;
+  ui.loginBusy = true; render();
+  signOut(auth).then(function () { return signInAnonymously(auth); }).then(function () {
+    uid = auth.currentUser.uid; ui.loginMsg = '';
+  }).catch(function () { ui.loginMsg = '로그아웃하지 못했어요. 새로고침한 뒤 다시 시도해 주세요.'; }).then(function () { ui.loginBusy = false; render(); });
+}
+
 function myName() {
   var n = clean(ui.name, 8);
   if (!n) { toast('닉네임을 입력해 주세요.'); return null; }
@@ -896,7 +956,9 @@ function myName() {
 
 function act(a, b) {
   switch (a) {
-    case 'create': { var n = myName(); if (n) enterRoom(genCode(), { createAs: n }); return; }
+    case 'googleLogin': googleLogin(); return;
+    case 'logout': logout(); return;
+    case 'create': { if (ui.loginBusy) { toast('로그인 처리 중이에요. 잠시만 기다려 주세요.'); return; } var n = myName(); if (n) enterRoom(genCode(), { createAs: n }); return; }
     case 'joinHere': { var n2 = myName(); if (n2) emit({ t: 'join', name: n2 }); return; }
     case 'leave': leaveRoom(); return;
     case 'copyLink':
@@ -938,6 +1000,7 @@ function act(a, b) {
 
 function form(f) {
   if (f === 'join') {
+    if (ui.loginBusy) { toast('로그인 처리 중이에요. 잠시만 기다려 주세요.'); return; }
     var c = clean(ui.codeIn, 4).toUpperCase();
     if (c.length !== 4) { toast('방 코드는 4글자예요.'); return; }
     var n = myName(); if (n) { ui.codeIn = ''; enterRoom(c, { joinAs: n }); }
@@ -991,11 +1054,15 @@ if (!loadError) render();
     auth = getAuth(fbApp);
   } catch (e) { console.error(e); conn.error = 'nodb'; conn.detail = String((e && (e.code || e.message)) || e); render(); return; }
   try {
-    var cred = await signInAnonymously(auth);
-    uid = cred.user.uid;
+    // Wait for a saved login to be restored. Calling signInAnonymously first would replace a Google login with a new guest.
+    if (auth.authStateReady) await auth.authStateReady();
+    else await new Promise(function (res) { var off = onAuthStateChanged(auth, function () { off(); res(); }); });
+    if (!auth.currentUser) await signInAnonymously(auth);
+    uid = auth.currentUser.uid;
   } catch (e) { console.error(e); conn.error = 'noid'; conn.detail = String((e && (e.code || e.message)) || e); render(); return; }
   conn.ready = true;
   try { ui.name = localStorage.getItem('five:name') || ''; } catch (e) {}
+  if (!ui.name && googleUser() && googleUser().displayName) ui.name = clean(googleUser().displayName, 8);
   var m = (location.hash || '').match(/^#r-([A-Za-z0-9]{4})$/), saved = null;
   try { saved = localStorage.getItem('five:room'); } catch (e) {}
   var c = m ? m[1].toUpperCase() : (saved && /^[A-Z0-9]{4}$/.test(saved) ? saved : null);
