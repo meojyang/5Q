@@ -147,12 +147,12 @@ details ul{margin:8px 0 0;padding-left:20px;display:flex;flex-direction:column;g
 
 <script type="module" onerror="window.__fiveLoadFail && window.__fiveLoadFail()">
 const FB = 'https://www.gstatic.com/firebasejs/10.14.1/';
-let initializeApp, getAuth, signInAnonymously, GoogleAuthProvider, signInWithPopup, linkWithPopup, signInWithCredential, signOut, onAuthStateChanged, initializeFirestore, collection, doc, addDoc, getDoc, setDoc, onSnapshot, serverTimestamp, firebaseConfig;
+let initializeApp, getAuth, signInAnonymously, GoogleAuthProvider, signInWithPopup, linkWithPopup, signInWithCredential, signOut, onAuthStateChanged, initializeFirestore, collection, doc, addDoc, getDoc, setDoc, onSnapshot, serverTimestamp, Timestamp, firebaseConfig;
 let loadError = null;
 try {
   ({ initializeApp } = await import(FB + 'firebase-app.js'));
   ({ getAuth, signInAnonymously, GoogleAuthProvider, signInWithPopup, linkWithPopup, signInWithCredential, signOut, onAuthStateChanged } = await import(FB + 'firebase-auth.js'));
-  ({ initializeFirestore, collection, doc, addDoc, getDoc, setDoc, onSnapshot, serverTimestamp } = await import(FB + 'firebase-firestore.js'));
+  ({ initializeFirestore, collection, doc, addDoc, getDoc, setDoc, onSnapshot, serverTimestamp, Timestamp } = await import(FB + 'firebase-firestore.js'));
   ({ firebaseConfig } = await import('./firebase-config.js'));
 } catch (e) { loadError = e; }
 
@@ -372,9 +372,10 @@ var fs = null, auth = null, uid = null;
 var conn = { ready: false, error: null };
 var code = null, col = null, unsub = null, loaded = false, events = [], S = newState();
 var myWord = null, myWordRound = 0, ctx = {}, sent = new Set();
+var beatDone = false, beatBusy = false, beatNext = 0, creating = false;
 var lastRound = -1, turnKey = '', turnLocal = Date.now(), sentTimeout = -1, lastPendingId = null;
 var ui = { name: '', codeIn: '', text: '', custom: '', topicIn: '', chatIn: '', noteIn: '', mode: 'ask', target: null, showWord: false,
-  confirmKick: null, adminOpen: false, opts: null, toast: '', slow: false, loginMsg: '', loginBusy: false };
+  confirmKick: null, adminOpen: false, opts: null, toast: '', slow: false, loginMsg: '', loginBusy: false, gone: false };
 // The word I picked this round. A word saved in an earlier round does not count.
 function W() { return myWord && myWordRound === S.round ? myWord : null; }
 var composing = false, dirty = false, slowT = null, toastT = null, writeChain = Promise.resolve();
@@ -397,7 +398,7 @@ function toast(msg) {
 var PEAKS = '<svg viewBox="0 0 100 40" aria-hidden="true"><path d="M0 40 L10 28 L18 34 L30 20 L38 28 L50 14 L58 22 L70 8 L78 16 L90 2 L100 40Z" fill="var(--accent)"/></svg>';
 
 function brand() {
-  return '<header class="brand">' + PEAKS + '<h1>다섯고개</h1></p>';
+  return '<header class="brand">' + PEAKS + '<h1>다섯고개</h1></header>';
 }
 function flags(ap) {
   var on = Math.min(ap, 5), h = '<span class="flags">';
@@ -416,7 +417,7 @@ var RULES = '<details class="card"><summary>게임 규칙</summary><ul>' +
   '<li>질문을 하거나 제시어를 맞출 때 AP가 1씩 소모됩니다.</li>' +
   '<li>제시어를 맞히면 상대는 탈락하고, AP를 2 얻습니다.</li>' +
   '<li>AP가 0이 되면 더 이상 질문을 할 수 없습니다.</li>' +
-  '<li>다른 사람의 제시어를 맞히는 시도만 할 수 있으며, 틀리면 바로 탈락합니다.<li>' +
+  '<li>다른 사람의 제시어를 맞히는 시도만 할 수 있으며, 틀리면 바로 탈락합니다.</li>' +
   '<li>맞히면 탈락하지 않지만 이때는 맞혀도 AP를 얻을 수 없습니다.</li>' +
   '<li>마지막까지 살아남는 사람이 우승자입니다.</li>' +
   '</ul></details>';
@@ -726,6 +727,7 @@ function endedView(me) {
 }
 
 function roomView() {
+  if (ui.gone) return '<section class="card"><h2>방이 사라졌어요</h2><p class="muted">모두가 나간 뒤 60초가 지나 삭제됐거나, 없는 방이에요. 새 방을 만들어 주세요.</p><button type="button" data-act="leave">처음으로</button></section>';
   var head = roomHead();
   if (!loaded) {
     return head + '<section class="card"><p class="muted">방에 접속하는 중이에요…</p>' + (ui.slow ? '<p class="small">연결이 느려요. 네트워크 상태를 확인해 주세요.</p>' : '') + '</section>';
@@ -754,7 +756,7 @@ function view() {
   if (conn.error === 'noid') return brand() + '<section class="card warn"><h2>접속에 실패했어요</h2><p>' + authHint(conn.detail) + '</p><p class="small muted" style="overflow-wrap:anywhere">오류 코드: ' + esc(conn.detail) + '</p></section>';
   if (!conn.ready) return brand() + '<section class="card"><p class="muted">연결하는 중이에요…</p></section>';
   if (conn.error === 'room') h += '<section class="card warn"><p>방과의 연결이 끊어졌어요. 페이지를 새로고침해 주세요.</p></section>';
-  h += code ? roomView() : homeView();
+  h += (code || ui.gone) ? roomView() : homeView();
   if (ui.toast) h += '<div class="toast" role="status">' + esc(ui.toast) + '</div>';
   return h;
 }
@@ -774,11 +776,42 @@ function render() {
 }
 
 /* ---------- room plumbing ---------- */
+// A room lives only while someone is in it. Members send a heartbeat to rooms/{code};
+// the security rules refuse every read/write once (beat + hold) has passed.
+function expireAt() { return Timestamp.fromMillis(Date.now() + 48 * 3600 * 1000); }
+function roomBeat(hold) { return { beat: serverTimestamp(), hold: hold, expireAt: expireAt() }; }
+function beat(hold) {
+  if (!code || !uid) return Promise.resolve();
+  if (beatBusy) { beatNext = hold; return Promise.resolve(); }
+  beatBusy = true;
+  return setDoc(doc(fs, 'rooms', code), roomBeat(hold)).catch(function () {}).then(function () {
+    beatBusy = false;
+    if (beatNext) { var h = beatNext; beatNext = 0; beat(h); }
+  });
+}
+function beatHold() { return document.hidden ? 300 : 75; }
+function createRoom(n) {
+  if (creating) return;
+  creating = true;
+  var c = genCode();
+  setDoc(doc(fs, 'rooms', c), roomBeat(75)).then(function () {
+    creating = false; enterRoom(c, { createAs: n });
+  }).catch(function () { creating = false; toast('방을 만들지 못했어요. 다시 눌러 주세요.'); });
+}
+function roomGone() {
+  if (unsub) { unsub(); unsub = null; }
+  clearTimeout(slowT);
+  ui.gone = true; loaded = true; code = null; col = null; S = newState(); events = []; myWord = null; ctx = {};
+  try { location.hash = ''; } catch (e) {}
+  store('five:room', null);
+  render();
+}
+
 function emit(ev) {
   if (!col) return Promise.resolve();
   var thisCol = col;
   writeChain = writeChain.then(function () {
-    var payload = Object.assign({ u: uid, n: events.length + 1, ts: serverTimestamp() }, ev);
+    var payload = Object.assign({ u: uid, n: events.length + 1, ts: serverTimestamp(), expireAt: expireAt() }, ev);
     return addDoc(thisCol, payload);
   }).catch(function () { toast('전송하지 못했어요. 다시 시도해 주세요.'); });
   return writeChain;
@@ -805,6 +838,7 @@ function enterRoom(c, opts) {
   if (unsub) { unsub(); unsub = null; }
   code = c; ctx = opts || {}; events = []; S = newState(); loaded = false; myWord = null; myWordRound = 0; sent = new Set();
   lastRound = -1; turnKey = ''; lastPendingId = null; sentTimeout = -1; turnLocal = Date.now();
+  beatDone = false; beatBusy = false; beatNext = 0; ui.gone = false;
   ui.opts = null; ui.slow = false; ui.showWord = false; ui.confirmKick = null; ui.text = ''; conn.error = conn.error === 'room' ? null : conn.error;
   col = collection(fs, 'rooms', c, 'events');
   try { location.hash = 'r-' + c; } catch (e) {}
@@ -816,12 +850,17 @@ function enterRoom(c, opts) {
     S = reduce(events);
     if (!snap.metadata.fromCache) { loaded = true; ui.slow = false; clearTimeout(slowT); }
     onState();
-  }, function () { conn.error = 'room'; render(); });
+  }, function (err) {
+    if (err && err.code === 'permission-denied') roomGone();
+    else { conn.error = 'room'; render(); }
+  });
   loadWord(c);
   render();
 }
 
 function leaveRoom() {
+  if (code && uid && S.players && S.players[uid] && !ui.gone) { try { setDoc(doc(fs, 'rooms', code), roomBeat(60)).catch(function () {}); } catch (e) {} }
+  ui.gone = false;
   if (unsub) { unsub(); unsub = null; }
   clearTimeout(slowT);
   code = null; col = null; loaded = false; S = newState(); events = []; myWord = null; ctx = {};
@@ -835,7 +874,7 @@ function ensureCtx() {
   if (ctx.createAs) {
     var n = ctx.createAs; ctx.createAs = null;
     if (!S.exists) emit({ t: 'create', code: code, name: n, topic: { key: 'animal', label: '동물' } });
-    else if (S.host !== uid) { enterRoom(genCode(), { createAs: n }); return true; }
+    else if (S.host !== uid) { createRoom(n); return true; }
   }
   if (ctx.joinAs) {
     var j = ctx.joinAs; ctx.joinAs = null;
@@ -871,6 +910,7 @@ function onState() {
   if (tk !== turnKey) { turnKey = tk; turnLocal = Date.now(); ui.text = ''; }
   var pid = S.pending ? S.pending.id : null;
   if (pid !== lastPendingId) { lastPendingId = pid; ui.noteIn = ''; }
+  if (!beatDone && S.players[uid]) { beatDone = true; beat(beatHold()); }
   render();
   autoActions();
 }
@@ -896,7 +936,7 @@ function setWord(w) {
   w = clean(w, 30);
   if (!w) { toast('제시어를 입력하거나 골라 주세요.'); return; }
   var c = code, r = S.round;
-  setDoc(doc(fs, 'users', uid, 'words', c), { word: w, r: r, ts: Date.now() }).then(function () {
+  setDoc(doc(fs, 'users', uid, 'words', c), { word: w, r: r, ts: Date.now(), expireAt: expireAt() }).then(function () {
     if (c !== code) return;
     myWord = w; myWordRound = r; ui.custom = ''; ui.showWord = true;
     emit({ t: 'ready' }); render();
@@ -958,7 +998,7 @@ function act(a, b) {
   switch (a) {
     case 'googleLogin': googleLogin(); return;
     case 'logout': logout(); return;
-    case 'create': { if (ui.loginBusy) { toast('로그인 처리 중이에요. 잠시만 기다려 주세요.'); return; } var n = myName(); if (n) enterRoom(genCode(), { createAs: n }); return; }
+    case 'create': { if (ui.loginBusy) { toast('로그인 처리 중이에요. 잠시만 기다려 주세요.'); return; } var n = myName(); if (n) createRoom(n); return; }
     case 'joinHere': { var n2 = myName(); if (n2) emit({ t: 'join', name: n2 }); return; }
     case 'leave': leaveRoom(); return;
     case 'copyLink':
@@ -1038,6 +1078,8 @@ app.addEventListener('compositionend', function (e) {
 app.addEventListener('toggle', function (e) { if (e.target && e.target.id === 'adminBox') ui.adminOpen = e.target.open; }, true);
 
 setInterval(tick, 250);
+setInterval(function () { if (code && beatDone) beat(beatHold()); }, 15000);
+document.addEventListener('visibilitychange', function () { if (code && beatDone) beat(beatHold()); });
 
 /* ---------- boot ---------- */
 if (!loadError) render();
